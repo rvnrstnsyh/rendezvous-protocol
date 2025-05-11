@@ -1,0 +1,40 @@
+[package]
+authors = ["Rivane Rasetiansyah <re@nvll.me>"]
+repository = "https://github.com/rvnrstnsyh/rendezvous-protocol"
+name = "rendezvous-protocol"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86.0"
+
+[dependencies]
+clap = { version = "4.5.37", features = ["derive"] }
+futures = "0.3.31"
+hex = "0.4.3"
+libp2p = { version = "0.55.0", features = [
+  "identify",
+  "macros",
+  "noise",
+  "ping",
+  "quic",
+  "rendezvous",
+  "tcp",
+  "tokio",
+  "yamux",
+] }
+tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread", "time"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[lints.clippy]
+arithmetic_side_effects = "deny"
+needless_return = "allow"
+too_many_arguments = "allow"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
