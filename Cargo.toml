@@ -15,8 +15,10 @@ hex = "0.4.3"
 libp2p = { version = "0.55.0", features = [
   "autonat",
   "dns",
+  "gossipsub",
   "identify",
   "macros",
+  "mdns",
   "noise",
   "ping",
   "quic",
