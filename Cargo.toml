@@ -8,10 +8,13 @@ edition = "2024"
 rust-version = "1.86.0"
 
 [dependencies]
+cfg-if = "1.0.0"
 clap = { version = "4.5.37", features = ["derive"] }
 futures = "0.3.31"
 hex = "0.4.3"
 libp2p = { version = "0.55.0", features = [
+  "autonat",
+  "dns",
   "identify",
   "macros",
   "noise",
@@ -23,6 +26,13 @@ libp2p = { version = "0.55.0", features = [
   "tokio",
   "yamux",
 ] }
+opentelemetry-jaeger = { version = "0.20.0", features = [
+  "rt-tokio",
+], optional = true }
+opentelemetry_sdk = { version = "0.21.1", features = [
+  "rt-tokio",
+], optional = true }
+rand = "0.8.5"
 tokio = { version = "1.45.0", features = [
   "macros",
   "rt-multi-thread",
@@ -30,7 +40,14 @@ tokio = { version = "1.45.0", features = [
   "time",
 ] }
 tracing = "0.1.41"
+tracing-opentelemetry = { version = "0.22.0", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[features]
+jaeger = ["opentelemetry_sdk", "tracing-opentelemetry", "opentelemetry-jaeger"]
+opentelemetry_sdk = ["dep:opentelemetry_sdk"]
+tracing-opentelemetry = ["dep:tracing-opentelemetry"]
+opentelemetry-jaeger = ["dep:opentelemetry-jaeger"]
 
 [lints.clippy]
 arithmetic_side_effects = "deny"

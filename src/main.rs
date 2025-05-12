@@ -5,21 +5,21 @@ use std::{
     time::Duration,
 };
 
+use cfg_if::cfg_if;
 use clap::Parser;
 use futures::StreamExt;
 use hex::FromHex;
 use libp2p::{
-    PeerId, Swarm, SwarmBuilder,
+    PeerId, Swarm, SwarmBuilder, autonat,
     core::{Multiaddr, multiaddr::Protocol},
     identify,
     identity::Keypair,
-    noise, ping, relay,
-    rendezvous::server,
+    noise, ping, relay, rendezvous,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux,
 };
+use rand::rngs::OsRng;
 use tokio::{signal, task::JoinHandle};
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 struct Opt {
@@ -44,16 +44,36 @@ struct Opt {
 }
 
 #[derive(NetworkBehaviour)]
-struct RendezvousBehaviour {
+struct ServerBehaviour {
+    autonat: autonat::v2::server::Behaviour,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
-    rendezvous: server::Behaviour,
+    rendezvous: rendezvous::server::Behaviour,
     relay: relay::Behaviour,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let _ = tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).try_init();
+    cfg_if! {
+        if #[cfg(feature = "jaeger")] {
+            use tracing_subscriber::layer::SubscriberExt;
+            use opentelemetry_sdk::runtime::Tokio;
+            let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                .with_endpoint("jaeger:34401")
+                .with_service_name("autonatv2")
+                .install_batch(Tokio)?;
+            let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+            let subscriber = tracing_subscriber::Registry::default()
+                .with(telemetry);
+        } else {
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .finish();
+        }
+    }
+
+    tracing::subscriber::set_global_default(subscriber).expect("Setting default subscriber failed");
+
     let opt: Opt = Opt::parse();
     let secret_key_bytes: [u8; 32] = <[u8; 32]>::from_hex(&opt.secret_key).expect("Secret key must be 32 bytes (64 hex characters)");
     let keypair: Keypair = Keypair::ed25519_from_bytes(secret_key_bytes).unwrap();
@@ -63,14 +83,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         max_circuit_bytes: opt.max_circuit_bytes,
         ..Default::default()
     };
-    let mut swarm: Swarm<RendezvousBehaviour> = SwarmBuilder::with_existing_identity(keypair)
+    let mut swarm: Swarm<ServerBehaviour> = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
         .with_quic()
-        .with_behaviour(|key| RendezvousBehaviour {
+        .with_behaviour(|key| ServerBehaviour {
+            autonat: autonat::v2::server::Behaviour::new(OsRng),
             identify: identify::Behaviour::new(identify_config.with_agent_version("rust-libp2p/0.55.0".to_string())),
             ping: ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_millis(3_000))),
-            rendezvous: server::Behaviour::new(server::Config::default()),
+            rendezvous: rendezvous::server::Behaviour::new(rendezvous::server::Config::default()),
             relay: relay::Behaviour::new(key.public().to_peer_id(), relay_config),
         })?
         .build();
@@ -106,49 +127,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     active_peers.insert(peer_id);
                     tracing::info!("Connection established with {} via {:?} (total peers: {})", peer_id, endpoint, active_peers.len());
                 }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    active_peers.remove(&peer_id);
-                    tracing::info!("Connection closed with {} (total peers: {})", peer_id, active_peers.len());
-                }
-                SwarmEvent::Behaviour(RendezvousBehaviourEvent::Rendezvous(server::Event::PeerRegistered { peer, registration })) => {
-                    tracing::info!(
-                        "{} registered for namespace '{}' for the next {} seconds",
-                        peer,
-                        registration.namespace,
-                        registration.ttl
-                    );
-                }
-                SwarmEvent::Behaviour(RendezvousBehaviourEvent::Rendezvous(server::Event::DiscoverServed { enquirer, registrations })) => {
-                    tracing::info!("Served peer {} with {} registrations", enquirer, registrations.len());
-                }
-                SwarmEvent::Behaviour(RendezvousBehaviourEvent::Relay(relay::Event::ReservationReqAccepted { src_peer_id, .. })) => {
-                    tracing::info!("Relay reservation accepted for {}", src_peer_id);
-                }
-                SwarmEvent::Behaviour(RendezvousBehaviourEvent::Relay(relay::Event::ReservationReqDenied { src_peer_id, .. })) => {
-                    tracing::warn!("Relay reservation denied for {}", src_peer_id);
-                }
-                SwarmEvent::Behaviour(RendezvousBehaviourEvent::Relay(relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. })) => {
-                    tracing::warn!("Circuit request denied from {} to {}", src_peer_id, dst_peer_id);
-                }
-                SwarmEvent::Behaviour(RendezvousBehaviourEvent::Relay(relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id, .. })) => {
-                    active_circuits = active_circuits.saturating_add(1);
-                    tracing::info!("Circuit established from {} to {} (active circuits: {})", src_peer_id, dst_peer_id, active_circuits);
-                }
-                SwarmEvent::Behaviour(RendezvousBehaviourEvent::Relay(relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. })) => {
-                    if active_circuits > 0 {
-                        active_circuits = active_circuits.saturating_sub(1);
-                    }
-                    tracing::info!("Circuit closed between {} and {} (active circuits: {})", src_peer_id, dst_peer_id, active_circuits);
-                }
-                SwarmEvent::Behaviour(event) => {
-                    if let RendezvousBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) = &event {
-                        tracing::debug!("Identified peer {} as {} with address: {}", peer_id, info.agent_version, info.observed_addr);
-                        swarm.add_external_address(info.observed_addr.clone());
-                    }
-                    if opt.verbose {
-                        tracing::debug!("Behaviour event: {:?}", event);
-                    }
-                }
                 SwarmEvent::IncomingConnectionError {
                     local_addr,
                     send_back_addr,
@@ -157,12 +135,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 } => {
                     tracing::warn!("Incoming connection error from {} to {}: {}", send_back_addr, local_addr, error);
                 }
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Autonat(autonat::v2::server::Event {
+                    tested_addr,
+                    data_amount,
+                    result,
+                    ..
+                })) => tracing::info!("Autonat-v2 dial request result for {} with {} status {:?}", tested_addr, data_amount, result.unwrap()),
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Rendezvous(rendezvous::server::Event::PeerRegistered { peer, registration })) => {
+                    tracing::info!(
+                        "{} registered for namespace '{}' for the next {} seconds",
+                        peer,
+                        registration.namespace,
+                        registration.ttl
+                    );
+                }
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Rendezvous(rendezvous::server::Event::DiscoverServed { enquirer, registrations })) => {
+                    tracing::info!("Served peer {} with {} registrations", enquirer, registrations.len());
+                }
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(relay::Event::ReservationReqAccepted { src_peer_id, .. })) => {
+                    tracing::info!("Relay reservation accepted for {}", src_peer_id);
+                }
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(relay::Event::ReservationReqDenied { src_peer_id, .. })) => {
+                    tracing::warn!("Relay reservation denied for {}", src_peer_id);
+                }
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. })) => {
+                    tracing::warn!("Circuit request denied from {} to {}", src_peer_id, dst_peer_id);
+                }
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id, .. })) => {
+                    active_circuits = active_circuits.saturating_add(1);
+                    tracing::info!("Circuit established from {} to {} (active circuits: {})", src_peer_id, dst_peer_id, active_circuits);
+                }
+                SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. })) => {
+                    if active_circuits > 0 {
+                        active_circuits = active_circuits.saturating_sub(1);
+                    }
+                    tracing::info!("Circuit closed between {} and {} (active circuits: {})", src_peer_id, dst_peer_id, active_circuits);
+                }
+                SwarmEvent::Behaviour(event) => {
+                    if let ServerBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) = &event {
+                        tracing::debug!("Identified peer {} as {} with address: {}", peer_id, info.agent_version, info.observed_addr);
+                        swarm.add_external_address(info.observed_addr.clone());
+                    }
+                    if opt.verbose {
+                        tracing::debug!("Behaviour event: {:?}", event);
+                    }
+                }
                 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                     if let Some(peer) = peer_id {
                         tracing::warn!("Failed to connect to {}: {}", peer, error);
                     } else {
                         tracing::warn!("Failed outgoing connection: {}", error);
                     }
+                }
+                SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    active_peers.remove(&peer_id);
+                    tracing::info!("Connection closed with {} (total peers: {})", peer_id, active_peers.len());
                 }
                 other => {
                     if opt.verbose {
@@ -180,10 +207,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     tokio::select! {
-        _ = shutdown_handle  => {
-            tracing::info!("Bye.");
-        },
         _ = swarm_handle => {}
+        _ = shutdown_handle  => {
+            tracing::info!(".");
+        },
     }
 
     return Ok(());
