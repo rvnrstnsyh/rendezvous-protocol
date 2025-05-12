@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
     error::Error,
-    hash::{DefaultHasher, Hash, Hasher},
     net::{Ipv4Addr, Ipv6Addr},
     time::Duration,
 };
@@ -13,7 +12,8 @@ use hex::FromHex;
 use libp2p::{
     PeerId, Swarm, SwarmBuilder, autonat,
     core::{Multiaddr, multiaddr::Protocol},
-    gossipsub, identify,
+    gossipsub::{self, Message, MessageId},
+    identify,
     identity::Keypair,
     mdns, noise, ping, relay, rendezvous,
     swarm::{NetworkBehaviour, SwarmEvent},
@@ -108,10 +108,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_secs(10))
                     .validation_mode(gossipsub::ValidationMode::Strict)
-                    .message_id_fn(|message: &gossipsub::Message| {
-                        let mut s: DefaultHasher = DefaultHasher::new();
-                        message.data.hash(&mut s);
-                        gossipsub::MessageId::from(s.finish().to_string())
+                    .message_id_fn(|message: &Message| {
+                        // peer_id + sequence_number + message -> message_id.
+                        MessageId::from(
+                            blake3::hash(
+                                format!(
+                                    "{}{}{}",
+                                    message
+                                        .source
+                                        .as_ref()
+                                        .map(|peer_id| peer_id.to_base58())
+                                        .unwrap_or_else(|| PeerId::from_bytes(&[0, 1, 0]).unwrap().to_base58()),
+                                    message.sequence_number.unwrap_or_default(),
+                                    blake3::hash(&message.data).to_hex()
+                                )
+                                .as_bytes(),
+                            )
+                            .as_bytes()
+                            .to_vec(),
+                        )
                     })
                     .build()
                     .map_err(io::Error::other)
