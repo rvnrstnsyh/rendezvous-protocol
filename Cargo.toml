@@ -10,7 +10,7 @@ rust-version = "1.86.0"
 [dependencies]
 blake3 = "1.8.2"
 cfg-if = "1.0.0"
-clap = { version = "4.5.37", features = ["derive"] }
+clap = { version = "4.5.38", features = ["derive"] }
 futures = "0.3.31"
 hex = "0.4.3"
 libp2p = { version = "0.55.0", features = [
@@ -32,7 +32,7 @@ libp2p = { version = "0.55.0", features = [
 opentelemetry-jaeger = { version = "0.20.0", features = [
   "rt-tokio",
 ], optional = true }
-opentelemetry_sdk = { version = "0.21.1", features = [
+opentelemetry_sdk = { version = "0.21.2", features = [
   "rt-tokio",
 ], optional = true }
 rand = "0.8.5"
