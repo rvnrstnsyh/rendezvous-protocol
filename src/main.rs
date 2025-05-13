@@ -65,8 +65,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             use tracing_subscriber::layer::SubscriberExt;
             use opentelemetry_sdk::runtime::Tokio;
             let tracer = opentelemetry_jaeger::new_agent_pipeline()
-                .with_endpoint("jaeger:34401")
-                .with_service_name("autonatv2")
+                .with_endpoint("jaeger:34400")
+                .with_service_name("autonat-v2")
                 .install_batch(Tokio)?;
             let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
             let subscriber = tracing_subscriber::Registry::default()
@@ -105,9 +105,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             relay: relay::Behaviour::new(key.public().to_peer_id(), relay_config),
             gossipsub: gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
+                // custom configuration to improve performance and reduce latency, see the default values ​​in gossipsub::Config.
                 gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(10))
-                    .validation_mode(gossipsub::ValidationMode::Strict)
+                    .mesh_n(10)
+                    .mesh_n_low(7)
+                    .mesh_n_high(14)
+                    .gossip_lazy(10)
+                    .gossip_factor(0.5)
+                    .heartbeat_initial_delay(Duration::from_millis(500))
+                    .heartbeat_interval(Duration::from_millis(250))
+                    .duplicate_cache_time(Duration::from_secs(300))
+                    .validate_messages()
                     .message_id_fn(|message: &Message| {
                         // peer_id + sequence_number + message -> message_id.
                         MessageId::from(
@@ -128,6 +136,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             .to_vec(),
                         )
                     })
+                    .do_px()
+                    .flood_publish(true)
+                    .graft_flood_threshold(Duration::from_secs(5))
+                    .mesh_outbound_min(4)
+                    .opportunistic_graft_ticks(30)
+                    .gossip_retransimission(5)
+                    .max_messages_per_rpc(None)
+                    .max_ihave_messages(20)
+                    .iwant_followup_time(Duration::from_millis(500))
+                    .published_message_ids_cache_time(Duration::from_secs(5))
+                    .validation_mode(gossipsub::ValidationMode::Strict)
                     .build()
                     .map_err(io::Error::other)
                     .expect("Failed to create gossipsub config"),
